@@ -1,6 +1,6 @@
 require('dotenv').config();
 const { google } = require('googleapis');
-const { indexFiles } = require('./rag');
+const { upsertFiles, pruneFiles } = require('./rag');
 
 const API_KEY = process.env.GOOGLE_DRIVE_API_KEY;
 const FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID;
@@ -47,32 +47,27 @@ async function listMarkdownFiles(rootFolderId) {
   return mdFiles;
 }
 
-// Download one file's content, retrying on Drive rate-limiting.
-// Google sometimes returns a 200 with a "We're sorry... automated queries" HTML
-// page instead of an error, so we detect that and treat it as retryable.
-async function downloadFileContent(file, attempt = 0) {
-  try {
-    const res = await drive.files.get(
-      { fileId: file.id, alt: 'media' },
-      { responseType: 'text' }
-    );
-    const data = res.data;
-    if (typeof data === 'string' &&
-        data.includes("We're sorry") &&
-        data.includes('automated queries')) {
-      throw new Error('Drive rate-limit page returned');
-    }
-    return data;
-  } catch (err) {
-    const msg = err.message || '';
-    const retryable = /rate|429|403|quota|sorry|automated|timeout|ECONN|socket|503|500/i.test(msg);
-    if (retryable && attempt < 6) {
-      const wait = Math.min(3000 * 2 ** attempt, 60000);
-      await new Promise(r => setTimeout(r, wait));
-      return downloadFileContent(file, attempt + 1);
-    }
-    throw err;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+function isThrottle(err) {
+  return /rate|429|403|quota|sorry|automated|503|500|ECONN|socket|timeout/i.test(err.message || '');
+}
+
+// Single download attempt. Google sometimes returns a 200 with a
+// "We're sorry... automated queries" HTML page instead of an error,
+// so we detect that and surface it as a throttle.
+async function downloadOnce(file) {
+  const res = await drive.files.get(
+    { fileId: file.id, alt: 'media' },
+    { responseType: 'text' }
+  );
+  const data = res.data;
+  if (typeof data === 'string' &&
+      data.includes("We're sorry") &&
+      data.includes('automated queries')) {
+    throw new Error('Drive rate-limit page returned');
   }
+  return data;
 }
 
 async function refreshVault() {
@@ -91,11 +86,16 @@ async function refreshVault() {
       return;
     }
 
-    // Drop cache entries for files that no longer exist
+    // Drop chunks + cache entries for files that no longer exist
     const liveIds = new Set(mdFiles.map(f => f.id));
     for (const id of Object.keys(contentCache)) {
       if (!liveIds.has(id)) delete contentCache[id];
     }
+    pruneFiles(mdFiles.map(f => f.name));
+
+    // Index anything already cached (instant on warm restarts)
+    const cachedFiles = mdFiles.map(f => contentCache[f.id]).filter(Boolean);
+    if (cachedFiles.length > 0) await upsertFiles(cachedFiles);
 
     // Download only new or modified files
     const toDownload = mdFiles.filter(f => {
@@ -107,34 +107,52 @@ async function refreshVault() {
     let downloaded = 0;
     let failed = 0;
     downloadProgress = { done: 0, total: toDownload.length, failed: 0 };
-    for (let i = 0; i < toDownload.length; i++) {
+
+    const BATCH = 25;        // index after each batch so the vault is searchable progressively
+    const STEADY_PAUSE = 60; // ms between files to soften the request rate
+    const COOLDOWN_MS = 60000;
+    const MAX_COOLDOWNS = 30;
+    let cooldowns = 0;
+    let batch = [];
+
+    let i = 0;
+    while (i < toDownload.length) {
       const file = toDownload[i];
       try {
-        const content = await downloadFileContent(file);
-        contentCache[file.id] = {
-          name: file.name,
-          content,
-          modifiedTime: file.modifiedTime,
-        };
+        const content = await downloadOnce(file);
+        contentCache[file.id] = { name: file.name, content, modifiedTime: file.modifiedTime };
+        batch.push(contentCache[file.id]);
         downloaded++;
+        i++;
       } catch (err) {
+        if (isThrottle(err) && cooldowns < MAX_COOLDOWNS) {
+          // Throttled — index what we have, wait once for the quota window to
+          // reset, then retry the SAME file (don't advance i)
+          cooldowns++;
+          console.warn(`[Aria] Drive throttled at ${i}/${toDownload.length}. Cooling down ${COOLDOWN_MS / 1000}s (cooldown #${cooldowns})...`);
+          if (batch.length > 0) { await upsertFiles(batch); batch = []; }
+          await sleep(COOLDOWN_MS);
+          continue;
+        }
         failed++;
-        console.error(`[Aria] Failed to fetch "${file.name}" after retries:`, err.message);
+        i++;
+        console.error(`[Aria] Giving up on "${file.name}":`, err.message);
       }
-      downloadProgress = { done: i + 1, total: toDownload.length, failed };
-      // Brief pause every 10 downloads to respect Drive rate limits
-      if ((i + 1) % 10 === 0) {
-        await new Promise(r => setTimeout(r, 300));
-        console.log(`[Aria] Downloaded ${i + 1}/${toDownload.length} (${failed} failed)...`);
-      }
-    }
-    console.log(`[Aria] Downloaded ${downloaded} file(s), ${failed} failed.`);
 
-    // Hand the full current file set to the RAG indexer (it embeds incrementally)
-    const files = mdFiles
-      .map(f => contentCache[f.id])
-      .filter(Boolean);
-    await indexFiles(files);
+      downloadProgress = { done: i, total: toDownload.length, failed };
+
+      // Index each batch as it completes
+      if (batch.length >= BATCH) {
+        await upsertFiles(batch);
+        batch = [];
+      }
+      await sleep(STEADY_PAUSE);
+    }
+
+    // Index the final partial batch
+    if (batch.length > 0) await upsertFiles(batch);
+
+    console.log(`[Aria] Downloaded ${downloaded} file(s), ${failed} failed, ${cooldowns} cooldown(s).`);
 
     lastRefresh = new Date();
     console.log(`[Aria] Refresh complete at ${lastRefresh.toISOString()}`);

@@ -107,42 +107,23 @@ async function embedTexts(texts, taskType) {
   return vectors;
 }
 
-// Incrementally (re)index the vault. files = [{ name, content, modifiedTime }]
-// Only changed/new files are re-embedded; deleted files are dropped.
-async function indexFiles(files) {
-  if (isIndexing) {
-    console.log('[RAG] Index already in progress, skipping.');
-    return;
-  }
+// Upsert a set of files into the index (add/update only — never deletes others).
+// Safe to call repeatedly with small batches so the vault becomes searchable
+// progressively during a long first load. Only new/changed files are re-embedded.
+async function upsertFiles(files) {
+  const changed = files.filter(f => {
+    const meta = fileMeta[f.name];
+    return !meta || meta.modifiedTime !== f.modifiedTime;
+  });
+  if (changed.length === 0) return;
+
   isIndexing = true;
   try {
-    const incomingNames = new Set(files.map(f => f.name));
-
-    // Drop chunks + meta for files that no longer exist
-    chunks = chunks.filter(c => incomingNames.has(c.fileName));
-    for (const name of Object.keys(fileMeta)) {
-      if (!incomingNames.has(name)) delete fileMeta[name];
-    }
-
-    // Which files are new or modified since last index?
-    const changed = files.filter(f => {
-      const meta = fileMeta[f.name];
-      return !meta || meta.modifiedTime !== f.modifiedTime;
-    });
-
-    if (changed.length === 0) {
-      console.log('[RAG] No file changes — index already current.');
-      lastIndexed = new Date();
-      return;
-    }
-
-    console.log(`[RAG] Re-indexing ${changed.length} new/changed file(s)...`);
-
     // Remove stale chunks for changed files before re-adding
     const changedNames = new Set(changed.map(f => f.name));
     chunks = chunks.filter(c => !changedNames.has(c.fileName));
 
-    // Build the chunk list for changed files
+    // Build chunk list for changed files
     const pending = [];
     for (const file of changed) {
       for (const text of chunkText(file.content)) {
@@ -150,7 +131,6 @@ async function indexFiles(files) {
       }
     }
 
-    // Embed in batches and attach vectors
     if (pending.length > 0) {
       const vectors = await embedTexts(pending.map(p => p.text), 'RETRIEVAL_DOCUMENT');
       for (let i = 0; i < pending.length; i++) {
@@ -159,17 +139,26 @@ async function indexFiles(files) {
       }
     }
 
-    // Update meta
     for (const file of changed) {
       fileMeta[file.name] = { modifiedTime: file.modifiedTime };
     }
 
     lastIndexed = new Date();
-    console.log(`[RAG] Index updated — ${chunks.length} chunk(s) across ${Object.keys(fileMeta).length} file(s).`);
+    console.log(`[RAG] Indexed ${changed.length} file(s) — now ${chunks.length} chunk(s) across ${Object.keys(fileMeta).length} file(s).`);
   } catch (err) {
-    console.error('[RAG] Indexing failed:', err.message);
+    console.error('[RAG] Upsert failed:', err.message);
   } finally {
     isIndexing = false;
+  }
+}
+
+// Remove chunks/meta for files that are no longer in the vault.
+// liveNames = Set or Array of current file names.
+function pruneFiles(liveNames) {
+  const live = liveNames instanceof Set ? liveNames : new Set(liveNames);
+  chunks = chunks.filter(c => live.has(c.fileName));
+  for (const name of Object.keys(fileMeta)) {
+    if (!live.has(name)) delete fileMeta[name];
   }
 }
 
@@ -203,4 +192,4 @@ function getIndexStatus() {
   };
 }
 
-module.exports = { indexFiles, retrieve, getIndexStatus };
+module.exports = { upsertFiles, pruneFiles, retrieve, getIndexStatus };

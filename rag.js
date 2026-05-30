@@ -110,9 +110,11 @@ async function embedTexts(texts, taskType) {
 // Upsert a set of files into the index (add/update only — never deletes others).
 // Safe to call repeatedly with small batches so the vault becomes searchable
 // progressively during a long first load. Only new/changed files are re-embedded.
+// Files are keyed by Drive id (not name) so duplicate basenames across folders
+// (many README.md / CHANGELOG.md) don't collide and evict each other.
 async function upsertFiles(files) {
   const changed = files.filter(f => {
-    const meta = fileMeta[f.name];
+    const meta = fileMeta[f.id];
     return !meta || meta.modifiedTime !== f.modifiedTime;
   });
   if (changed.length === 0) return;
@@ -120,14 +122,14 @@ async function upsertFiles(files) {
   isIndexing = true;
   try {
     // Remove stale chunks for changed files before re-adding
-    const changedNames = new Set(changed.map(f => f.name));
-    chunks = chunks.filter(c => !changedNames.has(c.fileName));
+    const changedIds = new Set(changed.map(f => f.id));
+    chunks = chunks.filter(c => !changedIds.has(c.id));
 
     // Build chunk list for changed files
     const pending = [];
     for (const file of changed) {
       for (const text of chunkText(file.content)) {
-        pending.push({ fileName: file.name, text });
+        pending.push({ id: file.id, fileName: file.name, text });
       }
     }
 
@@ -135,12 +137,12 @@ async function upsertFiles(files) {
       const vectors = await embedTexts(pending.map(p => p.text), 'RETRIEVAL_DOCUMENT');
       for (let i = 0; i < pending.length; i++) {
         if (!vectors[i]) continue; // skip chunks whose embedding failed
-        chunks.push({ fileName: pending[i].fileName, text: pending[i].text, embedding: vectors[i] });
+        chunks.push({ id: pending[i].id, fileName: pending[i].fileName, text: pending[i].text, embedding: vectors[i] });
       }
     }
 
     for (const file of changed) {
-      fileMeta[file.name] = { modifiedTime: file.modifiedTime };
+      fileMeta[file.id] = { modifiedTime: file.modifiedTime, name: file.name };
     }
 
     lastIndexed = new Date();
@@ -153,12 +155,12 @@ async function upsertFiles(files) {
 }
 
 // Remove chunks/meta for files that are no longer in the vault.
-// liveNames = Set or Array of current file names.
-function pruneFiles(liveNames) {
-  const live = liveNames instanceof Set ? liveNames : new Set(liveNames);
-  chunks = chunks.filter(c => live.has(c.fileName));
-  for (const name of Object.keys(fileMeta)) {
-    if (!live.has(name)) delete fileMeta[name];
+// liveIds = Set or Array of current Drive file ids.
+function pruneFiles(liveIds) {
+  const live = liveIds instanceof Set ? liveIds : new Set(liveIds);
+  chunks = chunks.filter(c => live.has(c.id));
+  for (const id of Object.keys(fileMeta)) {
+    if (!live.has(id)) delete fileMeta[id];
   }
 }
 
@@ -188,7 +190,7 @@ function getIndexStatus() {
     chunkCount: chunks.length,
     lastIndexed,
     isIndexing,
-    fileNames: Object.keys(fileMeta),
+    fileNames: Object.values(fileMeta).map(m => m.name),
   };
 }
 

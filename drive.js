@@ -91,7 +91,7 @@ async function refreshVault() {
     for (const id of Object.keys(contentCache)) {
       if (!liveIds.has(id)) delete contentCache[id];
     }
-    pruneFiles(mdFiles.map(f => f.name));
+    pruneFiles(mdFiles.map(f => f.id));
 
     // Index anything already cached (instant on warm restarts)
     const cachedFiles = mdFiles.map(f => contentCache[f.id]).filter(Boolean);
@@ -120,7 +120,7 @@ async function refreshVault() {
       const file = toDownload[i];
       try {
         const content = await downloadOnce(file);
-        contentCache[file.id] = { name: file.name, content, modifiedTime: file.modifiedTime };
+        contentCache[file.id] = { id: file.id, name: file.name, content, modifiedTime: file.modifiedTime };
         batch.push(contentCache[file.id]);
         downloaded++;
         i++;

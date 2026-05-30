@@ -69,8 +69,12 @@ app.post('/api/refresh', (req, res) => {
 app.get('/api/status', (req, res) => {
   const files = getVaultContent();
   const status = getVaultStatus();
+  const totalChars = files.reduce((sum, f) => sum + (f.content ? f.content.length : 0), 0);
   res.json({
     fileCount: files.length,
+    totalChars,
+    contextCapChars: 1500000,
+    fitsInContext: totalChars <= 1500000,
     lastRefresh: status.lastRefresh,
     isRefreshing: status.isRefreshing,
     fileNames: files.map(f => f.name),

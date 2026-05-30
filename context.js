@@ -1,4 +1,6 @@
-const MAX_CONTEXT_CHARS = 80000;
+// Gemini 2.5 Flash has a 1M-token (~4M char) context window.
+// 1.5M chars (~375k tokens) is well within that and captures a large vault in full.
+const MAX_CONTEXT_CHARS = 1500000;
 
 function buildSystemPrompt(vaultFiles) {
   const header = `You are Aria, the internal AI assistant for Ghost Noise — a music community, creative studio, and event space based in Dalton, Georgia.

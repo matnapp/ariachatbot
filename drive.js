@@ -12,6 +12,7 @@ const drive = google.drive({ version: 'v3', auth: API_KEY });
 const contentCache = {}; // fileId -> { name, content, modifiedTime }
 let lastRefresh = null;
 let isRefreshing = false;
+let downloadProgress = { done: 0, total: 0, failed: 0 };
 
 // BFS folder traversal — one folder at a time to avoid rate limiting
 async function listMarkdownFiles(rootFolderId) {
@@ -46,6 +47,34 @@ async function listMarkdownFiles(rootFolderId) {
   return mdFiles;
 }
 
+// Download one file's content, retrying on Drive rate-limiting.
+// Google sometimes returns a 200 with a "We're sorry... automated queries" HTML
+// page instead of an error, so we detect that and treat it as retryable.
+async function downloadFileContent(file, attempt = 0) {
+  try {
+    const res = await drive.files.get(
+      { fileId: file.id, alt: 'media' },
+      { responseType: 'text' }
+    );
+    const data = res.data;
+    if (typeof data === 'string' &&
+        data.includes("We're sorry") &&
+        data.includes('automated queries')) {
+      throw new Error('Drive rate-limit page returned');
+    }
+    return data;
+  } catch (err) {
+    const msg = err.message || '';
+    const retryable = /rate|429|403|quota|sorry|automated|timeout|ECONN|socket|503|500/i.test(msg);
+    if (retryable && attempt < 6) {
+      const wait = Math.min(3000 * 2 ** attempt, 60000);
+      await new Promise(r => setTimeout(r, wait));
+      return downloadFileContent(file, attempt + 1);
+    }
+    throw err;
+  }
+}
+
 async function refreshVault() {
   if (isRefreshing) {
     console.log('[Aria] Refresh already in progress, skipping.');
@@ -76,29 +105,30 @@ async function refreshVault() {
     console.log(`[Aria] ${toDownload.length} file(s) new or changed since last refresh.`);
 
     let downloaded = 0;
+    let failed = 0;
+    downloadProgress = { done: 0, total: toDownload.length, failed: 0 };
     for (let i = 0; i < toDownload.length; i++) {
       const file = toDownload[i];
       try {
-        const contentRes = await drive.files.get(
-          { fileId: file.id, alt: 'media' },
-          { responseType: 'text' }
-        );
+        const content = await downloadFileContent(file);
         contentCache[file.id] = {
           name: file.name,
-          content: contentRes.data,
+          content,
           modifiedTime: file.modifiedTime,
         };
         downloaded++;
       } catch (err) {
-        console.error(`[Aria] Failed to fetch "${file.name}":`, err.message);
+        failed++;
+        console.error(`[Aria] Failed to fetch "${file.name}" after retries:`, err.message);
       }
+      downloadProgress = { done: i + 1, total: toDownload.length, failed };
       // Brief pause every 10 downloads to respect Drive rate limits
       if ((i + 1) % 10 === 0) {
         await new Promise(r => setTimeout(r, 300));
-        console.log(`[Aria] Downloaded ${i + 1}/${toDownload.length}...`);
+        console.log(`[Aria] Downloaded ${i + 1}/${toDownload.length} (${failed} failed)...`);
       }
     }
-    console.log(`[Aria] Downloaded ${downloaded} file(s).`);
+    console.log(`[Aria] Downloaded ${downloaded} file(s), ${failed} failed.`);
 
     // Hand the full current file set to the RAG indexer (it embeds incrementally)
     const files = mdFiles
@@ -117,7 +147,7 @@ async function refreshVault() {
 }
 
 function getVaultStatus() {
-  return { lastRefresh, isRefreshing };
+  return { lastRefresh, isRefreshing, downloadProgress };
 }
 
 function startRefreshInterval() {

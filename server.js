@@ -79,6 +79,7 @@ app.get('/api/status', (req, res) => {
     isIndexing: index.isIndexing,
     lastRefresh: driveStatus.lastRefresh,
     isRefreshing: driveStatus.isRefreshing,
+    downloadProgress: driveStatus.downloadProgress,
     fileNames: index.fileNames,
   });
 });

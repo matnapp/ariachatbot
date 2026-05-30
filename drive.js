@@ -6,7 +6,27 @@ const API_KEY = process.env.GOOGLE_DRIVE_API_KEY;
 const FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID;
 const REFRESH_INTERVAL_MS = parseInt(process.env.REFRESH_INTERVAL_MS || '3600000', 10);
 
-const drive = google.drive({ version: 'v3', auth: API_KEY });
+// Prefer a service account (authenticated = high quota, no rate-limit wall).
+// Falls back to the API key if no service-account JSON is configured.
+function buildAuth() {
+  const saJson = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+  if (saJson) {
+    try {
+      const credentials = JSON.parse(saJson);
+      console.log(`[Aria] Using service-account auth (${credentials.client_email}).`);
+      return new google.auth.GoogleAuth({
+        credentials,
+        scopes: ['https://www.googleapis.com/auth/drive.readonly'],
+      });
+    } catch (err) {
+      console.error('[Aria] GOOGLE_SERVICE_ACCOUNT_JSON is set but invalid JSON; falling back to API key:', err.message);
+    }
+  }
+  console.log('[Aria] Using API-key auth (rate-limited — set GOOGLE_SERVICE_ACCOUNT_JSON for reliable bulk loads).');
+  return API_KEY;
+}
+
+const drive = google.drive({ version: 'v3', auth: buildAuth() });
 
 // Cache file content keyed by Drive fileId so we only re-download what changed
 const contentCache = {}; // fileId -> { name, content, modifiedTime }

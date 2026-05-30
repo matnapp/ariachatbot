@@ -9,6 +9,7 @@ const drive = google.drive({ version: 'v3', auth: API_KEY });
 
 let vaultCache = [];
 let lastRefresh = null;
+let isRefreshing = false;
 
 // Returns all .md files under folderId, recursing into subfolders in parallel
 async function listMarkdownFiles(folderId) {
@@ -46,6 +47,11 @@ async function listMarkdownFiles(folderId) {
 }
 
 async function refreshVault() {
+  if (isRefreshing) {
+    console.log('[Aria] Refresh already in progress, skipping.');
+    return;
+  }
+  isRefreshing = true;
   try {
     console.log('[Aria] Fetching vault from Google Drive...');
 
@@ -87,6 +93,8 @@ async function refreshVault() {
   } catch (err) {
     console.error('[Aria] Vault refresh failed:', err.message);
     console.error('[Aria] Keeping last good cache.');
+  } finally {
+    isRefreshing = false;
   }
 }
 
@@ -94,9 +102,13 @@ function getVaultContent() {
   return vaultCache;
 }
 
+function getVaultStatus() {
+  return { lastRefresh, isRefreshing };
+}
+
 function startRefreshInterval() {
   refreshVault();
   setInterval(refreshVault, REFRESH_INTERVAL_MS);
 }
 
-module.exports = { getVaultContent, refreshVault, startRefreshInterval };
+module.exports = { getVaultContent, getVaultStatus, refreshVault, startRefreshInterval };

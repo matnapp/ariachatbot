@@ -2,7 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const path = require('path');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
-const { getVaultContent, refreshVault, startRefreshInterval } = require('./drive');
+const { getVaultContent, getVaultStatus, refreshVault, startRefreshInterval } = require('./drive');
 const { buildSystemPrompt } = require('./context');
 
 const app = express();
@@ -60,15 +60,21 @@ app.post('/api/chat', async (req, res) => {
   }
 });
 
-app.post('/api/refresh', async (req, res) => {
-  try {
-    await refreshVault();
-    const files = getVaultContent();
-    res.json({ success: true, fileCount: files.length });
-  } catch (err) {
-    console.error('[Aria] Manual refresh error:', err.message);
-    res.status(500).json({ success: false, error: err.message });
-  }
+app.post('/api/refresh', (req, res) => {
+  // Fire and forget — don't wait for the full load (can take minutes for large vaults)
+  refreshVault().catch(err => console.error('[Aria] Manual refresh error:', err.message));
+  res.json({ success: true, message: 'Vault refresh started in background. Check /api/status for progress.' });
+});
+
+app.get('/api/status', (req, res) => {
+  const files = getVaultContent();
+  const status = getVaultStatus();
+  res.json({
+    fileCount: files.length,
+    lastRefresh: status.lastRefresh,
+    isRefreshing: status.isRefreshing,
+    fileNames: files.map(f => f.name),
+  });
 });
 
 app.listen(PORT, () => {

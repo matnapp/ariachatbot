@@ -2,7 +2,8 @@ require('dotenv').config();
 const express = require('express');
 const path = require('path');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
-const { getVaultContent, getVaultStatus, refreshVault, startRefreshInterval } = require('./drive');
+const { getVaultStatus, refreshVault, startRefreshInterval } = require('./drive');
+const { retrieve, getIndexStatus } = require('./rag');
 const { buildSystemPrompt } = require('./context');
 
 const app = express();
@@ -19,22 +20,24 @@ app.post('/api/chat', async (req, res) => {
     return res.status(400).json({ error: 'messages array is required' });
   }
 
-  const vaultFiles = getVaultContent();
-  const systemPrompt = buildSystemPrompt(vaultFiles);
-
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
 
   try {
+    const latestMessage = messages[messages.length - 1].content;
+
+    // Retrieve only the most relevant vault excerpts for this question
+    const retrieved = await retrieve(latestMessage);
+    const systemPrompt = buildSystemPrompt(retrieved);
+
     // Convert Anthropic-format history to Gemini format
     // Gemini uses 'model' instead of 'assistant', and parts[] instead of content string
     const geminiHistory = messages.slice(0, -1).map(m => ({
       role: m.role === 'assistant' ? 'model' : 'user',
       parts: [{ text: m.content }],
     }));
-    const latestMessage = messages[messages.length - 1].content;
 
     const model = genai.getGenerativeModel({
       model: 'gemini-2.5-flash',
@@ -67,18 +70,16 @@ app.post('/api/refresh', (req, res) => {
 });
 
 app.get('/api/status', (req, res) => {
-  const files = getVaultContent();
-  const status = getVaultStatus();
-  const totalChars = files.reduce((sum, f) => sum + (f.content ? f.content.length : 0), 0);
-  const CONTEXT_CAP = 2500000;
+  const driveStatus = getVaultStatus();
+  const index = getIndexStatus();
   res.json({
-    fileCount: files.length,
-    totalChars,
-    contextCapChars: CONTEXT_CAP,
-    fitsInContext: totalChars <= CONTEXT_CAP,
-    lastRefresh: status.lastRefresh,
-    isRefreshing: status.isRefreshing,
-    fileNames: files.map(f => f.name),
+    fileCount: index.fileCount,
+    chunkCount: index.chunkCount,
+    lastIndexed: index.lastIndexed,
+    isIndexing: index.isIndexing,
+    lastRefresh: driveStatus.lastRefresh,
+    isRefreshing: driveStatus.isRefreshing,
+    fileNames: index.fileNames,
   });
 });
 

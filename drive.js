@@ -61,7 +61,9 @@ async function refreshVault() {
       return;
     }
 
-    // Fetch sequentially with a small delay to avoid triggering Google's rate limits
+    // Fetch sequentially with a small delay to avoid triggering Google's rate limits.
+    // Publish to the live cache incrementally so progress is visible via /api/status
+    // and Aria can answer from partial content while a large vault is still loading.
     const fetched = [];
     for (let i = 0; i < mdFiles.length; i++) {
       const file = mdFiles[i];
@@ -74,8 +76,10 @@ async function refreshVault() {
       } catch (err) {
         console.error(`[Aria] Failed to fetch "${file.name}":`, err.message);
       }
-      // Brief pause every 10 files to stay within Drive API rate limits
+      // Brief pause every 10 files to stay within Drive API rate limits,
+      // and publish progress to the live cache
       if ((i + 1) % 10 === 0) {
+        vaultCache = fetched.slice();
         await new Promise(r => setTimeout(r, 300));
         console.log(`[Aria] Progress: ${i + 1}/${mdFiles.length} files loaded...`);
       }

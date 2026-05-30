@@ -11,36 +11,34 @@ let vaultCache = [];
 let lastRefresh = null;
 let isRefreshing = false;
 
-// Returns all .md files under folderId, recursing into subfolders in parallel
-async function listMarkdownFiles(folderId) {
+// BFS folder traversal — processes one folder at a time to avoid rate limiting
+async function listMarkdownFiles(rootFolderId) {
   const mdFiles = [];
-  const subfolderIds = [];
-  let pageToken = null;
+  const queue = [rootFolderId];
 
-  do {
-    const res = await drive.files.list({
-      q: `'${folderId}' in parents and trashed = false`,
-      fields: 'nextPageToken, files(id, name, mimeType)',
-      pageSize: 1000,
-      ...(pageToken ? { pageToken } : {}),
-    });
+  while (queue.length > 0) {
+    const folderId = queue.shift();
+    let pageToken = null;
 
-    const files = res.data.files || [];
-    pageToken = res.data.nextPageToken || null;
+    do {
+      const res = await drive.files.list({
+        q: `'${folderId}' in parents and trashed = false`,
+        fields: 'nextPageToken, files(id, name, mimeType)',
+        pageSize: 1000,
+        ...(pageToken ? { pageToken } : {}),
+      });
 
-    for (const file of files) {
-      if (file.mimeType === 'application/vnd.google-apps.folder') {
-        subfolderIds.push(file.id);
-      } else if (file.name.endsWith('.md') || file.mimeType === 'text/plain') {
-        mdFiles.push(file);
+      const files = res.data.files || [];
+      pageToken = res.data.nextPageToken || null;
+
+      for (const file of files) {
+        if (file.mimeType === 'application/vnd.google-apps.folder') {
+          queue.push(file.id);
+        } else if (file.name.endsWith('.md') || file.mimeType === 'text/plain') {
+          mdFiles.push(file);
+        }
       }
-    }
-  } while (pageToken);
-
-  // Recurse into all subfolders in parallel
-  if (subfolderIds.length > 0) {
-    const nested = await Promise.all(subfolderIds.map(id => listMarkdownFiles(id)));
-    for (const files of nested) mdFiles.push(...files);
+    } while (pageToken);
   }
 
   return mdFiles;
